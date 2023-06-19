@@ -1,0 +1,42 @@
+version: 0.2
+env: 
+  shell: bash
+  exported-variables:
+    - ENV_NAME
+    - DEPLOYMENT_BUCKET
+    - SourceCode1
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 12
+
+  pre_build:
+    commands:
+      - echo install started on `date`
+      #- yum update -y
+      - npm --version
+      - echo install started on `date`
+
+  build:
+    commands:
+      - echo Enter Build Phase `date`
+      - echo ${SourceCode1}, ${ENV_NAME}, ${DEPLOYMENT_BUCKET}, ${CODEBUILD_SRC_DIR}
+      # prepare build stage
+      # Move assets to build staging directory
+      - cd ../ && mkdir -p build/${SourceCode1} && cp -r ${CODEBUILD_SRC_DIR}/. build/${SourceCode1}
+      # Report staged content
+      - cd ./build
+      - echo build directory built location `pwd` 
+      - echo Recursive list of directories `ls -R`
+      - echo Exit PreBuild Phase `date`
+      
+  post_build:
+    commands:
+      - echo Enter PostBuild Phase `date`
+      - echo ${SourceCode1}, ${ENV_NAME}, ${CODEBUILD_SRC_DIR}
+      - cd ${SourceCode1}/scripts/deploy && echo `pwd`
+      - chmod 755 ./build.sh && ./build.sh ${ENV_NAME} ${DEPLOYMENT_BUCKET}
+      - chmod 755 ./publish.sh && ./publish.sh ${ENV_NAME} ${DEPLOYMENT_BUCKET}
+      - echo Exit PostBuild Phase `date`
+

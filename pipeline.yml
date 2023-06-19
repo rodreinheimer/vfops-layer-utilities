@@ -1,0 +1,331 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: VF Operations Lambda Utilities Layer Pipeline - Delta Deploy
+Parameters:
+  PipelineBucketName:
+    Type: String
+    Default: vf-ops-lambda-utilities-layer-pipeline-delta-deploy
+  DeploymentBucketName:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9.@\-_]+'
+    Default: vf-ops-lambda-layer-utilities-delta-deploy-assets
+  GitHubOwner:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9.@\-_]+'
+    Default: rreinheimer1
+  GitHubLayerRepository:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9.@\-_]+'
+    Default: vfops-layer-utilities
+  GitHubBranch:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9.@\-_]+'
+    Default: main
+  GitHubCredentialArn:
+    Type: String
+    Default: arn:aws:codebuild:us-west-1:343224624564:token/github
+  CodeBuildEnvironmentType:
+    Type: String
+    Default: 'LINUX_CONTAINER'
+  CodeBuildEnvironmentComputeType:
+    Type: String
+    Default: 'BUILD_GENERAL1_SMALL'
+  CodeBuildEnvironmentImage:
+    Type: String
+    Default: 'aws/codebuild/amazonlinux2-x86_64-standard:3.0'
+
+Resources:
+  CodePipelineArtifactStore:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref PipelineBucketName
+      VersioningConfiguration:
+        Status: Enabled
+
+#  CodeBuildGitHubSourceCredential:
+#    Type: 'AWS::CodeBuild::SourceCredential'
+#    Properties:
+#      AuthType: PERSONAL_ACCESS_TOKEN
+#      ServerType: GITHUB
+#      Token: >-
+#        {{resolve:secretsmanager:GITHUB_ACCESS_CONFIG_LAYER:SecretString:GITHUB_ACCESS_TOKEN}}
+  
+  CodeBuildProjectDeployDev:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: !Sub '${AWS::StackName}-deploy-dev'
+      ServiceRole: !GetAtt 
+        - CodeBuildUtilitiesLayerServiceRole
+        - Arn
+      Source:
+        Type: GITHUB
+        Location: !Sub 'https://github.com/${GitHubOwner}/${GitHubLayerRepository}.git'
+        BuildSpec: deployspec.yml
+        Auth:
+          Type: OAUTH
+          Resource: !Ref GitHubCredentialArn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: >-
+                PULL_REQUEST_MERGED
+            - Type: BASE_REF
+              Pattern: !Sub '^refs/heads/${GitHubBranch}$'
+      Environment:
+        Type: !Ref CodeBuildEnvironmentType
+        ComputeType: !Ref CodeBuildEnvironmentComputeType
+        Image: !Ref CodeBuildEnvironmentImage
+        EnvironmentVariables:
+          - Name: ENV_NAME
+            Type: PLAINTEXT
+            Value: dev
+          - Name: DEPLOYMENT_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref DeploymentBucketName
+          - Name: STACK_NAME
+            Type: PLAINTEXT
+            Value: '${AWS::StackName}-deploy-dev'
+          - Name: SourceCode1
+            Type: PLAINTEXT
+            Value: vfops-layer-utilities
+
+  CodeBuildProjectDeployProd:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: !Sub '${AWS::StackName}-deploy-prd'
+      ServiceRole: !GetAtt 
+        - CodeBuildUtilitiesLayerServiceRole
+        - Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: deployspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: !Ref CodeBuildEnvironmentType
+        ComputeType: !Ref CodeBuildEnvironmentComputeType
+        Image: !Ref CodeBuildEnvironmentImage
+        EnvironmentVariables:
+          - Name: ENV_NAME
+            Type: PLAINTEXT
+            Value: prd
+          - Name: DEPLOYMENT_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref DeploymentBucketName
+          - Name: STACK_NAME
+            Type: PLAINTEXT
+            Value: '${AWS::StackName}-deploy-prd'
+          - Name: SourceCode1
+            Type: PLAINTEXT
+            Value: vfops-layer-utilities
+
+  CodePipelineWebhook:
+    Type: 'AWS::CodePipeline::Webhook'
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: >-
+          {{resolve:secretsmanager:GITHUB_ACCESS_VF_POC:SecretString:GITHUB_ACCESS_TOKEN}}
+      RegisterWithThirdParty: 'true'
+      Filters:
+        - JsonPath: $.ref
+          MatchEquals: 'refs/heads/{Branch}'
+        - JsonPath: $.repository.name
+          MatchEquals: '{Repo}'
+      TargetPipeline: !Ref CodePipeline
+      TargetAction: Source
+      TargetPipelineVersion: !GetAtt 
+        - CodePipeline
+        - Version
+
+  CodePipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: !Ref 'AWS::StackName'
+      RoleArn: !GetAtt 
+        - CodePipelineUtilitiesLayerServiceRole
+        - Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineArtifactStore
+
+      Stages:
+        - Name: VF-Operations
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubLayerRepository
+                Branch: !Ref GitHubBranch
+                PollForSourceChanges: false
+                OAuthToken: >-
+                  {{resolve:secretsmanager:GITHUB_ACCESS_VF_POC:SecretString:GITHUB_ACCESS_TOKEN}}
+              OutputArtifacts:
+                - Name: SourceCode1
+
+        - Name: Development
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectDeployDev
+              InputArtifacts:
+                - Name: SourceCode1
+
+        - Name: Production
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectDeployProd
+              InputArtifacts:
+                - Name: SourceCode1
+
+  CodePipelineUtilitiesLayerServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: VFOPSLambdaFoundationUtilitiesLayerPipelineServiceRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 's3:PutObject'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 'codebuild:BatchGetBuilds'
+                  - 'codebuild:StartBuild'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetApplicationRevision
+                  - codedeploy:GetDeployment
+                  - codedeploy:GetDeploymentConfig
+                  - codedeploy:RegisterApplicationRevision
+                Resource: '*'
+                Effect: Allow
+
+  CodeBuildUtilitiesLayerServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: VFOPSLambdaFoundationUtilitiesLayerCodeBuildServiceRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:CreateFunction'
+                  - 'lambda:DeleteFunction'
+                  - 'lambda:GetFunction'
+                  - 'lambda:PublishLayerVersion'
+                  - 'lambda:GetLayerVersion'
+                  - 'lambda:AddPermission'
+                  - 'lambda:RemovePermission'
+                  - 'lambda:GetFunctionConfiguration'
+                  - 'lambda:UpdateFunctionConfiguration'
+                  - 'lambda:ListTags'
+                  - 'lambda:TagResource'
+                  - 'lambda:UntagResource'
+                  - 'lambda:UpdateFunctionCode'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 'iam:GetRole'
+                  - 'iam:CreateRole'
+                  - 'iam:DeleteRole'
+                  - 'iam:PassRole'
+                  - 'iam:PutRolePolicy'
+                  - 'iam:DetachRolePolicy'
+                  - 'iam:AttachRolePolicy'
+                  - 'iam:DeleteRolePolicy'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:PutObject'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:PutBucketNotification'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:DescribeStacks'
+                  - 'cloudformation:ListStacks'
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:CreateChangeSet'
+                  - 'cloudformation:DescribeChangeSet'
+                  - 'cloudformation:ExecuteChangeSet'
+                  - 'cloudformation:ValidateTemplate'
+                  - 'cloudformation:DescribeStackResource'
+                  - 'cloudformation:DescribeStackEvents'
+                  - 'cloudformation:GetTemplateSummary'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 'events:PutTargets'
+                  - 'events:PutRule'
+                  - 'events:DescribeRule'
+                Resource: '*'
+                Effect: Allow
